@@ -18,7 +18,6 @@ int main(int argc, char **argv) {
 	printf("RAND_MAX = %u\n", RAND_MAX); 
 
 	for(i = 0; i < iter; i++) {
-		CSF_CFG *csf_cfg;
 		CSF_CTX *csf_ctx;
 
 		unsigned char *key;
@@ -32,8 +31,7 @@ int main(int argc, char **argv) {
 		key = calloc(key_len, 1);
 		RAND_pseudo_bytes(key, key_len);
 
-		csf_config_init(&csf_cfg, key, key_len, 512);
-		csf_ctx_init(&csf_ctx, &fd1, csf_cfg);
+		csf_ctx_init(&csf_ctx, &fd1, key, key_len, 512);
 
 		srand(i);
 		ssize_t sz0, sz1;
@@ -44,7 +42,7 @@ int main(int argc, char **argv) {
 		sz0 = sz1 = rand() % buffer_sz_max;
 	
 		buffer0 = calloc(sz0, 1);
-		RAND_pseudo_bytes(buffer0, sz0);
+		//RAND_pseudo_bytes(buffer0, sz0);
 		buffer1 = calloc(sz1, 1);
 		memcpy(buffer1, buffer0, sz1);
 
@@ -57,7 +55,8 @@ int main(int argc, char **argv) {
 		for(j = 0; j < iter; j++) {
 			int offset = rand() % sz0;
 			int len = rand() % (sz0 - offset);
-			RAND_pseudo_bytes(buffer0, len);
+			//RAND_pseudo_bytes(buffer0, len);
+			memset(buffer0, 0, sz0);	
 			memcpy(buffer1, buffer0, len);
 			
 			lseek(fd0, offset, SEEK_SET);
@@ -124,7 +123,6 @@ int main(int argc, char **argv) {
 		free(buffer1);
 
 		csf_ctx_destroy(csf_ctx);
-		csf_cfg_destroy(csf_cfg);
 		memset(key, 0, key_len);
 		free(key);
 

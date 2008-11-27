@@ -27,114 +27,72 @@
 #define TRACE6(X,Y,Z,W,V,U)
 #endif
 
-static int inited = 0;
+static void *csf_malloc(int sz);
+static void * csf_free(void * buf, int sz);
+static int csf_read_file_sz(CSF_CTX *ctx);
+static int csf_write_file_sz(CSF_CTX *ctx, int sz);
+static int csf_get_len(CSF_CTX *ctx, int len);
 
-
-/*
-int sqlite3csf_init(sqlite3 *db, unsigned char *keyd, int len, int data_block_sz) {
-	int i;
-
-	csf_config_init(&db->cfg, keyd, len, data_block_sz);
-	for(i=0; i<db->nDb; i++){
-		struct Db *pDb = &db->aDb[i];
-		if( pDb->pBt ){
-			btree_set_csf_cfg(pDb->pBt, db->cfg);
-		}
-	}
-}
-*/
-
-int csf_config_init(CSF_CFG **cfg_out, unsigned char *keyd, int len, int data_block_sz) {
+int csf_ctx_init(CSF_CTX **ctx_out, int *fh, unsigned char *keydata, int key_sz, int data_sz) {
 	EVP_CIPHER_CTX ectx;
-	CSF_CFG *cfg;
-	cfg = csf_malloc(sizeof(CSF_CFG));
- 	if(inited != 1) { 
-		OpenSSL_add_all_algorithms();
- 		inited = 1;
-	}
-	
-	cfg->key_sz = len;
-	cfg->data_block_sz = data_block_sz;
-	cfg->keydata = csf_malloc(cfg->key_sz);
-	memcpy(cfg->keydata, keyd, cfg->key_sz);
+	CSF_CTX *ctx;
 
-	EVP_EncryptInit(&ectx, CIPHER, cfg->keydata, NULL);
-	cfg->block_sz = EVP_CIPHER_CTX_block_size(&ectx);
-	cfg->iv_sz = EVP_CIPHER_CTX_iv_length(&ectx);
+	ctx = csf_malloc(sizeof(CSF_CTX));
+	ctx->seek_ptr = ctx->file_sz = 0;
+	ctx->fh = fh;
+
+	ctx->key_sz = key_sz;
+	ctx->data_sz = data_sz;
+	ctx->keydata = csf_malloc(ctx->key_sz);
+	memcpy(ctx->keydata, keydata, ctx->key_sz);
+
+	EVP_EncryptInit(&ectx, CIPHER, ctx->keydata, NULL);
+	ctx->block_sz = EVP_CIPHER_CTX_block_size(&ectx);
+	ctx->iv_sz = EVP_CIPHER_CTX_iv_length(&ectx);
 		
-	if(cfg->data_block_sz % cfg->block_sz != 0) {
+	if(ctx->data_sz % ctx->block_sz != 0) {
 		printf("FATAL ERROR: Block Size error!\n");
 		return 1;
 	}
 		
-	/* the combined block size includes the size of the initialization
-	   vector and the data block 
-	   FIXME*/
-
-	cfg->cmb_block_sz = cfg->iv_sz + cfg->data_block_sz;
+	/* the combined page size includes the size of the initialization  
+	   vector and the data block */
+	ctx->page_sz = ctx->iv_sz + ctx->data_sz;
 		
 	EVP_CIPHER_CTX_cleanup(&ectx);
 
+	TRACE2("csf_init() ctx->block_sz=%d\n", ctx->block_sz);
 
-	TRACE2("csf_init() ctx->cfg->block_sz=%d\n", cfg->block_sz);
+	ctx->encrypted=1;
 
-	cfg->encrypted=1;
-	*cfg_out = cfg;
-	return 0;
-}
-
-int csf_ctx_init(CSF_CTX **ctx_out, int *fh, CSF_CFG *cfg) {
-	CSF_CTX *ctx;
-	ctx = csf_malloc(sizeof(CSF_CTX));
-	ctx->csf_seek_ptr = 0;
-	ctx->file_sz = 0;
-	ctx->cfg = cfg;
-	ctx->fh = fh;
 	*ctx_out = ctx;
+
 	return 0;	
 }
 
 
 int csf_ctx_destroy(CSF_CTX *ctx) {
-	ctx->csf_seek_ptr = 0;
-	ctx->file_sz = 0;
-}
-
-int csf_cfg_destroy(CSF_CFG *cfg) {
-	if(cfg) {
-		cfg->block_sz = 0;
-		cfg->iv_sz = 0;
-		cfg->data_block_sz = 0;
-		
-		cfg->key_sz = 0;
-		cfg->cmb_block_sz = 0;
-		csf_free(cfg->keydata, cfg->key_sz);
-		csf_free(cfg, sizeof(CSF_CTX));	
-		cfg = 0;
-	}
-	return 0;
+	csf_free(ctx->keydata, ctx->key_sz);
+	csf_free(ctx, sizeof(CSF_CTX));	
 }
 
 /*
 	input: desired byte offset in the file
-
 	output: the first logical byte of the block that contains
 	the desired offset.
-
 	note: this method does not include the header
 */
 
-
-inline int csf_get_true_block_start(CSF_CTX *ctx,int sz) {
-	return (sz / ctx->cfg->data_block_sz) * ctx->cfg->cmb_block_sz;
-}
-
-inline int csf_get_logical_block_start(CSF_CTX *ctx, int sz) {
-	return (sz - (sz % ctx->cfg->data_block_sz));
+inline int csf_get_true_block_start(CSF_CTX *ctx, int sz) {
+	return HDR_SZ + ((sz / ctx->data_sz) * ctx->page_sz);
 }
 
 inline int csf_get_logical_position(CSF_CTX *ctx, int pos) {
-	return (pos / ctx->cfg->cmb_block_sz) * ctx->cfg->data_block_sz;	
+	return ((pos - HDR_SZ) / ctx->page_sz) * ctx->data_sz;	
+}
+
+inline int csf_get_logical_block_start(CSF_CTX *ctx, int sz) {
+	return (sz - (sz % ctx->data_sz));
 }
 
 /*
@@ -145,18 +103,14 @@ inline int csf_get_logical_position(CSF_CTX *ctx, int pos) {
 	TEST AND FIXME
 */
 int csf_get_len(CSF_CTX *ctx, int len) {
-	int size;
-	
-	/* the base size calcuatled by dividing
-	   the lenght by block size to round it down
-	   and multiplying it back by block size */
-	size = (len / ctx->cfg->data_block_sz) * ctx->cfg->cmb_block_sz;
-	
-	/* if the lenght is not evenly divisible by the
-	   block lenght, add another block to handle the
-	   overflow (padding) */
-	if ( (len % ctx->cfg->data_block_sz) != 0 ) {
-		size += ctx->cfg->cmb_block_sz;
+	/* * calculate base size by dividing
+	     the input lenght by block size (to round down)
+	   * multiply by page size
+	   * account for an overflow page if necessary
+	*/	
+	int size = (len / ctx->data_sz) * ctx->page_sz;
+	if ( (len % ctx->data_sz) != 0 ) {
+		size += ctx->page_sz;
 	}
 	return size;
 }
@@ -172,7 +126,7 @@ int csf_get_len(CSF_CTX *ctx, int len) {
 */
 int csf_truncate(CSF_CTX *ctx, int nByte) {
 	int retval;
-	retval = csf_get_len(ctx, nByte) + HDR_SZ;
+	retval = HDR_SZ + csf_get_len(ctx, nByte);
 	TRACE4("csf_truncate(%d,%d), retval = %d\n", *ctx->fh, nByte, retval);
 	csf_write_file_sz(ctx, nByte);
 	return ftruncate(*ctx->fh, retval);
@@ -191,17 +145,17 @@ int csf_seek(CSF_CTX *ctx, int offset) {
 	/* get the block start, and seek to that position
 	   adjusted for the header size */
 	csf_seek = csf_get_true_block_start(ctx,offset);
-	pos = lseek(*ctx->fh, csf_seek + HDR_SZ, SEEK_SET);
+	pos = lseek(*ctx->fh, csf_seek, SEEK_SET);
 	l_pos = csf_get_logical_block_start(ctx, offset);
 	
 	/* set the csf_seek pointer to the "overlap". After
 	   the seek the file pointer will be at the beginning
 	   of the block, but the requested location may be further
 	   into the file */
-	ctx->csf_seek_ptr = offset - l_pos;
+	ctx->seek_ptr = offset - l_pos;
 
 	TRACE3("csf_seek = %d, pos = %d\n", csf_seek, pos);
-	TRACE5("csf_seek(%d,%d), retval = %d, ctx->csf_seek_ptr = %d\n", *ctx->fh, offset, pos - HDR_SZ, ctx->csf_seek_ptr);
+	TRACE5("csf_seek(%d,%d), retval = %d, ctx->seek_ptr = %d\n", *ctx->fh, offset, pos, ctx->seek_ptr);
 
 	/* return the seeked to postion, adjusted down to account for the header */
 	return l_pos;
@@ -231,20 +185,20 @@ int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte) {
 	cur_pos = lseek(*ctx->fh, 0L, SEEK_CUR);
 
 	/* determing the current overlap */
-	cur_csf_seek = ctx->csf_seek_ptr;
+	cur_csf_seek = ctx->seek_ptr;
 	
 	TRACE2("cur_pos=%d\n", cur_pos);
-	assert(((cur_pos - HDR_SZ) % ctx->cfg->cmb_block_sz) == 0);
+	assert(((cur_pos - HDR_SZ) % ctx->page_sz) == 0);
 
 	/* determing the size of the chunk to read from the file 
 	   this will be a multiple of the block size */
-	sz = csf_get_len(ctx, nbyte + ctx->csf_seek_ptr);
+	sz = csf_get_len(ctx, nbyte + ctx->seek_ptr);
 
 	TRACE2("sz=%d\n", sz);
 	
 	/* allocate memory, and read the data from the file */
-	rd_buffer = csf_malloc(ctx->cfg->cmb_block_sz);
-	csf_buffer = csf_malloc(ctx->cfg->cmb_block_sz);
+	rd_buffer = csf_malloc(ctx->page_sz);
+	csf_buffer = csf_malloc(ctx->page_sz);
 
 	tmp_nbyte = nbyte;
 	out_off = 0;
@@ -254,10 +208,10 @@ int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte) {
 		int tmp_cur_csf_seek = 0;
 		int to_write = 0;
 		
-		tmp_rd_sz = read(*ctx->fh, rd_buffer, ctx->cfg->cmb_block_sz);
+		tmp_rd_sz = read(*ctx->fh, rd_buffer, ctx->page_sz);
 	
-		if(tmp_rd_sz != ctx->cfg->cmb_block_sz) {
-			TRACE3("reading %d bytes via read() in csf_read(), rd_sz = %d\n", ctx->cfg->cmb_block_sz, tmp_rd_sz);
+		if(tmp_rd_sz != ctx->page_sz) {
+			TRACE3("reading %d bytes via read() in csf_read(), rd_sz = %d\n", ctx->page_sz, tmp_rd_sz);
 		}
 		
 		if(tmp_rd_sz <= 0) {
@@ -273,13 +227,13 @@ int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte) {
 		
 		TRACE3("rd_sz = %d, tmp_rd_sz = %d\n", rd_sz, tmp_rd_sz);
 		
-		if(tmp_cur_csf_seek < ctx->cfg->data_block_sz) {
+		if(tmp_cur_csf_seek < ctx->data_sz) {
 			int oct;
 			EVP_CIPHER_CTX ectx;
 			unsigned char * oPtr;
 			unsigned char * iPtr;
 
-			to_write = ctx->cfg->data_block_sz - tmp_cur_csf_seek;
+			to_write = ctx->data_sz - tmp_cur_csf_seek;
 			to_write = tmp_nbyte < to_write ? tmp_nbyte : to_write;
 			
 			/* decrypt the data read in from the file. note that the 
@@ -287,21 +241,21 @@ int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte) {
 				if the read size exceeded the end of the file */
 		
 			oPtr = 	csf_buffer;
-			iPtr = rd_buffer + ctx->cfg->iv_sz;
+			iPtr = rd_buffer + ctx->iv_sz;
 	
 			EVP_CipherInit(&ectx, CIPHER, NULL, NULL, 0);
         		EVP_CIPHER_CTX_set_padding(&ectx, 0);
-	        	EVP_CipherInit(&ectx, NULL, ctx->cfg->keydata, rd_buffer, 0);
+	        	EVP_CipherInit(&ectx, NULL, ctx->keydata, rd_buffer, 0);
 
 			//EVP_CipherUpdate(&ctx, oPtr, &oct, iPtr, tmp_rd_sz);
-			EVP_CipherUpdate(&ectx, oPtr, &oct, iPtr, ctx->cfg->data_block_sz);
+			EVP_CipherUpdate(&ectx, oPtr, &oct, iPtr, ctx->data_sz);
 			csz = oct;	
 			oPtr += oct;
 			EVP_CipherFinal(&ectx, oPtr, &oct);
 			csz += oct;
 			EVP_CIPHER_CTX_cleanup(&ectx);
 		
-			assert(ctx->cfg->data_block_sz == csz);
+			assert(ctx->data_sz == csz);
 	
 			/* copy the decrypted data from the buffer into the output
 				array */
@@ -311,35 +265,35 @@ int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte) {
 		}
 		
 		rd_sz += tmp_rd_sz;
-		l_rd_sz += tmp_rd_sz - ctx->cfg->iv_sz ;
+		l_rd_sz += tmp_rd_sz - ctx->iv_sz ;
 	}
 
         if(rd_sz != sz) {
 		/* if rd_sz is not equal sz, then the read request passed the
 		   end of file. therefore the file pointer is at the end of file
 		   and there is no overlap */
-		ctx->csf_seek_ptr = 0;
-	} else if(nbyte + cur_csf_seek < ctx->cfg->data_block_sz) {
+		ctx->seek_ptr = 0;
+	} else if(nbyte + cur_csf_seek < ctx->data_sz) {
 		/* if the number of bytes to read and the current overlap offset 
 		   are less than the block size, then adjust the csf_seek overlap
 		   and rewind to teh original position. That is to say that the next
 		   read should occur in the same block as this read */
-			ctx->csf_seek_ptr += nbyte;
+			ctx->seek_ptr += nbyte;
 		lseek(*ctx->fh, cur_pos, SEEK_SET);
 	} else {
 		/* otherwise adjust the offset pointer to the new overlap. If there is
 		   an overlap, the file pointer should be rewound by one block. */
-		ctx->csf_seek_ptr = (nbyte + cur_csf_seek) % ctx->cfg->data_block_sz;
-		if(ctx->csf_seek_ptr > 0) {
-			lseek(*ctx->fh, ctx->cfg->cmb_block_sz * -1, SEEK_CUR);
+		ctx->seek_ptr = (nbyte + cur_csf_seek) % ctx->data_sz;
+		if(ctx->seek_ptr > 0) {
+			lseek(*ctx->fh, ctx->page_sz * -1, SEEK_CUR);
 		}
 	}
 
 	/* wipe the data and free the allocated memory */
-	csf_free(rd_buffer, ctx->cfg->cmb_block_sz);
-	csf_free(csf_buffer, ctx->cfg->cmb_block_sz);
+	csf_free(rd_buffer, ctx->page_sz);
+	csf_free(csf_buffer, ctx->page_sz);
 	
-	TRACE5("csf_read(%d,x,%d), cur_pos = %d, ctx->csf_seek_ptr = %d\n", *ctx->fh, nbyte, cur_pos, ctx->csf_seek_ptr);
+	TRACE5("csf_read(%d,x,%d), cur_pos = %d, ctx->seek_ptr = %d\n", *ctx->fh, nbyte, cur_pos, ctx->seek_ptr);
 
 	assert(l_rd_sz - cur_csf_seek >= 0);
 
@@ -393,8 +347,10 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 	cur_pos = lseek(*ctx->fh, 0L, SEEK_CUR);
 
 	/* determing the current overlap */
-	cur_csf_seek = ctx->csf_seek_ptr;
+	cur_csf_seek = ctx->seek_ptr;
 	
+	/* if the current seek pointer is before the first page
+	   seek to the first page */	
 	if(cur_pos < HDR_SZ) {
 		csf_seek(ctx, 0);
 		cur_pos = lseek(*ctx->fh, 0L, SEEK_CUR);
@@ -402,10 +358,10 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 
 	assert(cur_pos >= HDR_SZ);
 
-	sz = csf_get_len(ctx, nbyte + ctx->csf_seek_ptr);
+	sz = csf_get_len(ctx, nbyte + ctx->seek_ptr);
 
-	wr_buffer = csf_malloc(ctx->cfg->cmb_block_sz);
-	csf_buffer = csf_malloc(ctx->cfg->cmb_block_sz);
+	wr_buffer = csf_malloc(ctx->page_sz);
+	csf_buffer = csf_malloc(ctx->page_sz);
 	
 	
 	tmp_nbyte = nbyte;
@@ -417,9 +373,9 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 		int tmp_cur_csf_seek = 0;
 		int to_write = 0;
 
-		tmp_rd_sz = read(*ctx->fh, wr_buffer, ctx->cfg->cmb_block_sz);
+		tmp_rd_sz = read(*ctx->fh, wr_buffer, ctx->page_sz);
 	
-		if(tmp_rd_sz != ctx->cfg->cmb_block_sz) {
+		if(tmp_rd_sz != ctx->page_sz) {
 			TRACE4("Error reading %d bytes via read() in csf_write() from cur_pos %d. rd_sz = %d\n", sz, cur_pos, tmp_rd_sz);
 		}
 	
@@ -431,57 +387,57 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 			tmp_cur_csf_seek = 0;	
 		}
 		
-		if(tmp_cur_csf_seek < ctx->cfg->data_block_sz) {
+		if(tmp_cur_csf_seek < ctx->data_sz) {
  			int oct;
                         EVP_CIPHER_CTX ectx;
                         unsigned char * oPtr;
                         unsigned char * iPtr;
 				
-			to_write = ctx->cfg->data_block_sz - tmp_cur_csf_seek;
+			to_write = ctx->data_sz - tmp_cur_csf_seek;
 			to_write = tmp_nbyte < to_write ? tmp_nbyte : to_write;
 
-			//assert(ctx->csf_seek_ptr + nbyte <= sz);
+			//assert(ctx->seek_ptr + nbyte <= sz);
 		
 			//csf_decrypt(wr_buffer, tmp_rd_sz, csf_buffer, &csz);
-			iPtr = wr_buffer + ctx->cfg->iv_sz;
+			iPtr = wr_buffer + ctx->iv_sz;
 			oPtr =  csf_buffer;
                         EVP_CipherInit(&ectx, CIPHER, NULL, NULL, 0);
                         EVP_CIPHER_CTX_set_padding(&ectx, 0);
-                        EVP_CipherInit(&ectx, NULL, ctx->cfg->keydata, wr_buffer, 0);
+                        EVP_CipherInit(&ectx, NULL, ctx->keydata, wr_buffer, 0);
 
-                        EVP_CipherUpdate(&ectx, oPtr, &oct, iPtr, ctx->cfg->data_block_sz);
+                        EVP_CipherUpdate(&ectx, oPtr, &oct, iPtr, ctx->data_sz);
                         csz = oct;
                         oPtr += oct;
                         EVP_CipherFinal(&ectx, oPtr, &oct);
                         csz += oct;
                         EVP_CIPHER_CTX_cleanup(&ectx);
 	
-			assert(ctx->cfg->data_block_sz==csz);
+			assert(ctx->data_sz==csz);
 		
 			// FIXME
 			memcpy(csf_buffer + tmp_cur_csf_seek, buf + in_off, to_write);
 		
-			//csf_encrypt(csf_buffer, ctx->cfg->data_block_sz, wr_buffer, &csz);
-			RAND_pseudo_bytes(wr_buffer, ctx->cfg->iv_sz);
-                        oPtr =  wr_buffer + ctx->cfg->iv_sz;
+			//csf_encrypt(csf_buffer, ctx->data_sz, wr_buffer, &csz);
+			RAND_pseudo_bytes(wr_buffer, ctx->iv_sz);
+                        oPtr =  wr_buffer + ctx->iv_sz;
                         EVP_CipherInit(&ectx, CIPHER, NULL, NULL, 1);
                         EVP_CIPHER_CTX_set_padding(&ectx, 0);
-                        EVP_CipherInit(&ectx, NULL, ctx->cfg->keydata, wr_buffer, 1);
+                        EVP_CipherInit(&ectx, NULL, ctx->keydata, wr_buffer, 1);
 
-                        EVP_CipherUpdate(&ectx, oPtr, &oct, csf_buffer, ctx->cfg->data_block_sz);
+                        EVP_CipherUpdate(&ectx, oPtr, &oct, csf_buffer, ctx->data_sz);
                         csz = oct;
                         oPtr += oct;
                         EVP_CipherFinal(&ectx, oPtr, &oct);
                         csz += oct;
                         EVP_CIPHER_CTX_cleanup(&ectx);		
 	
-			assert(ctx->cfg->data_block_sz==csz);
+			assert(ctx->data_sz==csz);
 			
 			lseek(*ctx->fh, tmp_rd_sz * -1, SEEK_CUR);
 			//FIXME
-			tmp_wr_sz = _write(*ctx->fh, wr_buffer, ctx->cfg->cmb_block_sz);
+			tmp_wr_sz = _write(*ctx->fh, wr_buffer, ctx->page_sz);
 			
-			if(tmp_wr_sz != ctx->cfg->cmb_block_sz) {
+			if(tmp_wr_sz != ctx->page_sz) {
 				TRACE2("Error writing %d bytes via write() in csf_write()\n", tmp_wr_sz);
 			}
 			
@@ -490,7 +446,7 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 		}
 		
 		wr_sz += tmp_wr_sz;
-		l_wr_sz += tmp_wr_sz - ctx->cfg->iv_sz;
+		l_wr_sz += tmp_wr_sz - ctx->iv_sz;
 	}
 		
 	//fprintf(stdout, "wr_sz = %d, sz = %d\n", wr_sz, sz);
@@ -499,24 +455,23 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 	
 	w_off = nbyte + cur_csf_seek;
 	
-	//w_off += (cur_pos > HDR_SZ) ? (cur_pos - HDR_SZ) : 0; 
-	w_off += csf_get_logical_position(ctx, cur_pos-HDR_SZ);
+	w_off += csf_get_logical_position(ctx, cur_pos);
 	
 	if(w_off > csf_read_file_sz(ctx)) csf_write_file_sz(ctx, w_off);
 
-	if(nbyte + ctx->csf_seek_ptr < ctx->cfg->data_block_sz) {
-		ctx->csf_seek_ptr += nbyte;
+	if(nbyte + ctx->seek_ptr < ctx->data_sz) {
+		ctx->seek_ptr += nbyte;
 		lseek(*ctx->fh, cur_pos, SEEK_SET);
 	} else {
-		ctx->csf_seek_ptr = (nbyte + ctx->csf_seek_ptr) % ctx->cfg->data_block_sz;
+		ctx->seek_ptr = (nbyte + ctx->seek_ptr) % ctx->data_sz;
 		//lseek(*ctx->fh, csf_get_block_start(w_off), SEEK_CUR);
-		lseek(*ctx->fh, csf_get_true_block_start(ctx, w_off) + HDR_SZ, SEEK_SET);
+		lseek(*ctx->fh, csf_get_true_block_start(ctx, w_off), SEEK_SET);
 	}
 
-	csf_free(wr_buffer, ctx->cfg->cmb_block_sz);
-	csf_free(csf_buffer, ctx->cfg->cmb_block_sz);
+	csf_free(wr_buffer, ctx->page_sz);
+	csf_free(csf_buffer, ctx->page_sz);
 
-	TRACE6("csf_write(%d,x,%d), cur_pos = %d, csf_seek = %d, w_off = %d\n", *ctx->fh, nbyte, cur_pos, ctx->csf_seek_ptr, w_off);
+	TRACE6("csf_write(%d,x,%d), cur_pos = %d, csf_seek = %d, w_off = %d\n", *ctx->fh, nbyte, cur_pos, ctx->seek_ptr, w_off);
 	return nbyte - tmp_nbyte;
 }
 
@@ -524,7 +479,7 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 /* FIXME these functions may only be required if NDEBUG is set
 #ifndef NDEBUG
 */
-int csf_write_file_sz(CSF_CTX *ctx, int sz) {
+static int csf_write_file_sz(CSF_CTX *ctx, int sz) {
 	int cur_pos = 0;
 	int end_pos = 0;
 	int amt = 0;
@@ -562,7 +517,7 @@ int csf_write_file_sz(CSF_CTX *ctx, int sz) {
 	store the acutual lenght of the data written into the file for other operations
 	like read and write. In this case the file lenght is written into the header
 */
-int csf_read_file_sz(CSF_CTX *ctx) {
+static int csf_read_file_sz(CSF_CTX *ctx) {
 	int rd_sz = 0;
 	int cur_pos = 0;
 	int end_pos = 0;
@@ -608,15 +563,10 @@ int csf_read_file_sz(CSF_CTX *ctx) {
 */
 void *csf_malloc(int sz) {
 	void *buf;
-
-	buf = malloc(sz);
-
+	buf = calloc(sz, 1);
 	if(buf == NULL) {
 		TRACE2("allocating %d bytes via malloc() in csf_malloc()", sz);
 	}
-
-	memset(buf, 0, sz);
-
 	return buf;
 }
 
