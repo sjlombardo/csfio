@@ -131,8 +131,8 @@ int csf_get_len(CSF_CTX *ctx, int len) {
 int csf_truncate(CSF_CTX *ctx, int nByte) {
 	int retval;
 	retval = HDR_SZ + csf_get_len(ctx, nByte);
-	TRACE4("csf_truncate(%d,%d), retval = %d\n", *ctx->fh, nByte, retval);
 	csf_write_file_sz(ctx, nByte);
+	TRACE4("csf_truncate(%d,%d), retval = %d\n", *ctx->fh, nByte, retval);
 	return ftruncate(*ctx->fh, retval);
 }
 
@@ -174,23 +174,19 @@ int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte) {
 	int csz = 0;
 	int rd_sz = 0;
 	int l_rd_sz = 0;
-	int cur_pos;
-	int cur_csf_seek;
+	int cur_pos; /* actual seek position */
+	int cur_csf_seek; /* logical seek position */ 
 	
 	int tmp_nbyte;
 	int out_off;
 
-
 	TRACE3("csf_read(%d,x,%d)\n", *ctx->fh, nbyte);
 	
-	/* save the current position in the file */
 	cur_pos = lseek(*ctx->fh, 0L, SEEK_CUR);
-
-	/* determing the current overlap */
 	cur_csf_seek = ctx->seek_ptr;
-	
-	TRACE2("cur_pos=%d\n", cur_pos);
+	TRACE3("cur_pos=%d, cur_csf_seek=%d\n", cur_pos, cur_csf_seek);
 	assert(((cur_pos - HDR_SZ) % ctx->page_sz) == 0);
+	//assert(cur_pos > cur_csf_seek);
 
 	/* determing the size of the chunk to read from the file 
 	   this will be a multiple of the block size */

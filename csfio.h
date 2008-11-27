@@ -6,8 +6,8 @@
 #include <openssl/rand.h>
 #include "csfio.h"
 
-/* #define CIPHER EVP_aes_256_cbc() */
-#define CIPHER EVP_aes_256_ecb()
+#define CIPHER EVP_aes_256_cbc()
+//#define CIPHER EVP_aes_256_ecb()
 
 #define MAGIC 0x53414654
 #define MAJOR_VER 0
