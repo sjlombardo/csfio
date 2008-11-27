@@ -324,7 +324,7 @@ int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte) {
 		   are less than the block size, then adjust the csf_seek overlap
 		   and rewind to teh original position. That is to say that the next
 		   read should occur in the same block as this read */
-		ctx->csf_seek_ptr += nbyte;
+			ctx->csf_seek_ptr += nbyte;
 		lseek(*ctx->fh, cur_pos, SEEK_SET);
 	} else {
 		/* otherwise adjust the offset pointer to the new overlap. If there is
@@ -416,7 +416,6 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 		int tmp_rd_sz = 0;
 		int tmp_cur_csf_seek = 0;
 		int to_write = 0;
-		
 
 		tmp_rd_sz = read(*ctx->fh, wr_buffer, ctx->cfg->cmb_block_sz);
 	
@@ -518,7 +517,7 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 	csf_free(csf_buffer, ctx->cfg->cmb_block_sz);
 
 	TRACE6("csf_write(%d,x,%d), cur_pos = %d, csf_seek = %d, w_off = %d\n", *ctx->fh, nbyte, cur_pos, ctx->csf_seek_ptr, w_off);
-	return sz - wr_sz;
+	return nbyte - tmp_nbyte;
 }
 
 
