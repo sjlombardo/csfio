@@ -58,20 +58,24 @@ int csf_ctx_init(CSF_CTX **ctx_out, int *fh, unsigned char *keydata, int key_sz,
 	/* the combined page size includes the size of the initialization  
 	   vector and the data block */
 	ctx->page_sz = ctx->iv_sz + ctx->data_sz;
-		
+	
+	ctx->page_buffer = csf_malloc(ctx->page_sz);
+	ctx->csf_buffer = csf_malloc(ctx->page_sz);
+	
 	EVP_CIPHER_CTX_cleanup(&ectx);
 
-	TRACE2("csf_init() ctx->block_sz=%d\n", ctx->block_sz);
-
 	ctx->encrypted=1;
+
+	TRACE2("csf_init() ctx->block_sz=%d\n", ctx->block_sz);
 
 	*ctx_out = ctx;
 
 	return 0;	
 }
 
-
 int csf_ctx_destroy(CSF_CTX *ctx) {
+	csf_free(ctx->page_buffer, ctx->page_sz);
+	csf_free(ctx->csf_buffer, ctx->page_sz);
 	csf_free(ctx->keydata, ctx->key_sz);
 	csf_free(ctx, sizeof(CSF_CTX));	
 }
@@ -166,8 +170,6 @@ int csf_seek(CSF_CTX *ctx, int offset) {
 	the buffer.
 */
 int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte) {
-	void *rd_buffer;
-	void *csf_buffer;
 	int sz;
 	int csz = 0;
 	int rd_sz = 0;
@@ -196,10 +198,6 @@ int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte) {
 
 	TRACE2("sz=%d\n", sz);
 	
-	/* allocate memory, and read the data from the file */
-	rd_buffer = csf_malloc(ctx->page_sz);
-	csf_buffer = csf_malloc(ctx->page_sz);
-
 	tmp_nbyte = nbyte;
 	out_off = 0;
 
@@ -208,7 +206,7 @@ int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte) {
 		int tmp_cur_csf_seek = 0;
 		int to_write = 0;
 		
-		tmp_rd_sz = read(*ctx->fh, rd_buffer, ctx->page_sz);
+		tmp_rd_sz = read(*ctx->fh, ctx->page_buffer, ctx->page_sz);
 	
 		if(tmp_rd_sz != ctx->page_sz) {
 			TRACE3("reading %d bytes via read() in csf_read(), rd_sz = %d\n", ctx->page_sz, tmp_rd_sz);
@@ -240,12 +238,12 @@ int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte) {
 				rd_sz might be less than sz, particularly
 				if the read size exceeded the end of the file */
 		
-			oPtr = 	csf_buffer;
-			iPtr = rd_buffer + ctx->iv_sz;
+			oPtr = 	ctx->csf_buffer;
+			iPtr = ctx->page_buffer + ctx->iv_sz;
 	
 			EVP_CipherInit(&ectx, CIPHER, NULL, NULL, 0);
         		EVP_CIPHER_CTX_set_padding(&ectx, 0);
-	        	EVP_CipherInit(&ectx, NULL, ctx->keydata, rd_buffer, 0);
+	        	EVP_CipherInit(&ectx, NULL, ctx->keydata, ctx->page_buffer, 0);
 
 			//EVP_CipherUpdate(&ctx, oPtr, &oct, iPtr, tmp_rd_sz);
 			EVP_CipherUpdate(&ectx, oPtr, &oct, iPtr, ctx->data_sz);
@@ -259,7 +257,7 @@ int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte) {
 	
 			/* copy the decrypted data from the buffer into the output
 				array */
-			memcpy(buf + out_off, csf_buffer + tmp_cur_csf_seek, to_write);
+			memcpy(buf + out_off, ctx->csf_buffer + tmp_cur_csf_seek, to_write);
 			out_off += to_write;
 			tmp_nbyte -= to_write;
 		}
@@ -289,10 +287,6 @@ int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte) {
 		}
 	}
 
-	/* wipe the data and free the allocated memory */
-	csf_free(rd_buffer, ctx->page_sz);
-	csf_free(csf_buffer, ctx->page_sz);
-	
 	TRACE5("csf_read(%d,x,%d), cur_pos = %d, ctx->seek_ptr = %d\n", *ctx->fh, nbyte, cur_pos, ctx->seek_ptr);
 
 	assert(l_rd_sz - cur_csf_seek >= 0);
@@ -327,8 +321,6 @@ int _write(int h, void *buffer, int sz) {
 	write the specified number of bytes of data into the file
 */
 int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
-	void *wr_buffer;
-	void *csf_buffer;
 	int sz;
 	int csz = 0;
 	int wr_sz = 0;
@@ -360,10 +352,6 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 
 	sz = csf_get_len(ctx, nbyte + ctx->seek_ptr);
 
-	wr_buffer = csf_malloc(ctx->page_sz);
-	csf_buffer = csf_malloc(ctx->page_sz);
-	
-	
 	tmp_nbyte = nbyte;
 	in_off = 0;
 	
@@ -373,7 +361,7 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 		int tmp_cur_csf_seek = 0;
 		int to_write = 0;
 
-		tmp_rd_sz = read(*ctx->fh, wr_buffer, ctx->page_sz);
+		tmp_rd_sz = read(*ctx->fh, ctx->page_buffer, ctx->page_sz);
 	
 		if(tmp_rd_sz != ctx->page_sz) {
 			TRACE4("Error reading %d bytes via read() in csf_write() from cur_pos %d. rd_sz = %d\n", sz, cur_pos, tmp_rd_sz);
@@ -398,12 +386,12 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 
 			//assert(ctx->seek_ptr + nbyte <= sz);
 		
-			//csf_decrypt(wr_buffer, tmp_rd_sz, csf_buffer, &csz);
-			iPtr = wr_buffer + ctx->iv_sz;
-			oPtr =  csf_buffer;
+			//csf_decrypt(ctx->page_buffer, tmp_rd_sz, ctx->csf_buffer, &csz);
+			iPtr = ctx->page_buffer + ctx->iv_sz;
+			oPtr =  ctx->csf_buffer;
                         EVP_CipherInit(&ectx, CIPHER, NULL, NULL, 0);
                         EVP_CIPHER_CTX_set_padding(&ectx, 0);
-                        EVP_CipherInit(&ectx, NULL, ctx->keydata, wr_buffer, 0);
+                        EVP_CipherInit(&ectx, NULL, ctx->keydata, ctx->page_buffer, 0);
 
                         EVP_CipherUpdate(&ectx, oPtr, &oct, iPtr, ctx->data_sz);
                         csz = oct;
@@ -415,16 +403,16 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 			assert(ctx->data_sz==csz);
 		
 			// FIXME
-			memcpy(csf_buffer + tmp_cur_csf_seek, buf + in_off, to_write);
+			memcpy(ctx->csf_buffer + tmp_cur_csf_seek, buf + in_off, to_write);
 		
-			//csf_encrypt(csf_buffer, ctx->data_sz, wr_buffer, &csz);
-			RAND_pseudo_bytes(wr_buffer, ctx->iv_sz);
-                        oPtr =  wr_buffer + ctx->iv_sz;
+			//csf_encrypt(ctx->csf_buffer, ctx->data_sz, ctx->page_buffer, &csz);
+			RAND_pseudo_bytes(ctx->page_buffer, ctx->iv_sz);
+                        oPtr =  ctx->page_buffer + ctx->iv_sz;
                         EVP_CipherInit(&ectx, CIPHER, NULL, NULL, 1);
                         EVP_CIPHER_CTX_set_padding(&ectx, 0);
-                        EVP_CipherInit(&ectx, NULL, ctx->keydata, wr_buffer, 1);
+                        EVP_CipherInit(&ectx, NULL, ctx->keydata, ctx->page_buffer, 1);
 
-                        EVP_CipherUpdate(&ectx, oPtr, &oct, csf_buffer, ctx->data_sz);
+                        EVP_CipherUpdate(&ectx, oPtr, &oct, ctx->csf_buffer, ctx->data_sz);
                         csz = oct;
                         oPtr += oct;
                         EVP_CipherFinal(&ectx, oPtr, &oct);
@@ -435,7 +423,7 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 			
 			lseek(*ctx->fh, tmp_rd_sz * -1, SEEK_CUR);
 			//FIXME
-			tmp_wr_sz = _write(*ctx->fh, wr_buffer, ctx->page_sz);
+			tmp_wr_sz = _write(*ctx->fh, ctx->page_buffer, ctx->page_sz);
 			
 			if(tmp_wr_sz != ctx->page_sz) {
 				TRACE2("Error writing %d bytes via write() in csf_write()\n", tmp_wr_sz);
@@ -467,9 +455,6 @@ int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte) {
 		//lseek(*ctx->fh, csf_get_block_start(w_off), SEEK_CUR);
 		lseek(*ctx->fh, csf_get_true_block_start(ctx, w_off), SEEK_SET);
 	}
-
-	csf_free(wr_buffer, ctx->page_sz);
-	csf_free(csf_buffer, ctx->page_sz);
 
 	TRACE6("csf_write(%d,x,%d), cur_pos = %d, csf_seek = %d, w_off = %d\n", *ctx->fh, nbyte, cur_pos, ctx->seek_ptr, w_off);
 	return nbyte - tmp_nbyte;

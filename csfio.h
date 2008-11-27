@@ -26,6 +26,8 @@ typedef struct {
         int iv_sz;
         int page_sz;
         unsigned char *keydata;
+        unsigned char *page_buffer;
+        unsigned char *csf_buffer;
 } CSF_CTX;
 
 int csf_ctx_init(CSF_CTX **ctx_out, int *fh, unsigned char *keydata, int key_sz, int data_sz);
