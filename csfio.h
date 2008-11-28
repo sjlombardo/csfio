@@ -17,8 +17,8 @@
 
 typedef struct {
 	int *fh;
-        int seek_ptr;
-        int file_sz;
+        off_t seek_ptr;
+        off_t file_sz;
         int encrypted;
         int key_sz;
         int data_sz;
@@ -33,7 +33,7 @@ typedef struct {
 
 int csf_ctx_init(CSF_CTX **ctx_out, int *fh, unsigned char *keydata, int key_sz, int data_sz);
 int csf_truncate(CSF_CTX *ctx, int nByte);
-int csf_seek(CSF_CTX *ctx, int offset);
+off_t csf_seek(CSF_CTX *ctx, off_t offset, int whence);
 int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte);
 int csf_write(CSF_CTX *ctx, const void *buf, size_t nbyte);
 int csf_ctx_destroy(CSF_CTX *ctx);

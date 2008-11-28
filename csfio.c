@@ -29,6 +29,8 @@
 
 static void *csf_malloc(int sz);
 static void * csf_free(void * buf, int sz);
+static size_t csf_read_page(CSF_CTX *ctx, int pgno, void *data);
+static size_t csf_write_page(CSF_CTX *ctx, int pgno, void *data, size_t data_sz); 
 
 int csf_ctx_init(CSF_CTX **ctx_out, int *fh, unsigned char *key_data, int key_sz, int data_sz) {
 	EVP_CIPHER_CTX ectx;
@@ -85,7 +87,7 @@ static int csf_page_count_for_file(CSF_CTX *ctx) {
 	return count;
 }
 
-inline int csf_pageno_for_offset(CSF_CTX *ctx, int offset) {
+inline off_t csf_pageno_for_offset(CSF_CTX *ctx, int offset) {
 	return (offset / ctx->data_sz);
 }
 
@@ -103,27 +105,45 @@ int csf_truncate(CSF_CTX *ctx, int offset) {
 	return ftruncate(*ctx->fh, true_offset);
 }
 
-int csf_seek(CSF_CTX *ctx, int offset) {
-	int csf_seek = 0;
-	int pos = 0;
-	int l_pos = 0;
-	
-	int true_offset = HDR_SZ + (csf_pageno_for_offset(ctx, offset) * ctx->page_sz);
+/* FIXME - what happens when you seek past end of file? */
+off_t csf_seek(CSF_CTX *ctx, off_t offset, int whence) {
+	off_t csf_seek = 0;
+	off_t true_offset;
 
-	csf_seek = lseek(*ctx->fh, true_offset, SEEK_SET);
-	assert(csf_seek == true_offset);
-	
-	ctx->seek_ptr = offset; /* should this be the offset in the page? */
+	switch(whence) {
+		case SEEK_SET:
+			ctx->seek_ptr = offset; /* should this be the offset in the page? */
+			true_offset = HDR_SZ + (csf_pageno_for_offset(ctx, ctx->seek_ptr) * ctx->page_sz);
+			csf_seek = lseek(*ctx->fh, true_offset, SEEK_SET);
+			assert(csf_seek == true_offset);
+			break;
+		case SEEK_CUR:
+			ctx->seek_ptr += offset; /* should this be the offset in the page? */
+			true_offset = HDR_SZ + (csf_pageno_for_offset(ctx, ctx->seek_ptr) * ctx->page_sz);
+			csf_seek = lseek(*ctx->fh, true_offset, SEEK_SET);
+			assert(csf_seek == true_offset);
+			break;
+
+		case SEEK_END:
+			{
+			/* FIXME optimize out second seek */
+			int page_count = csf_page_count_for_file(ctx);
+			size_t data_sz = csf_read_page(ctx, page_count-1, ctx->page_buffer);
+			ctx->seek_ptr = ((page_count - 1) * ctx->data_sz) + data_sz;
+			}
+			break;
+	}	
+
 	TRACE5("csf_seek(%d,%d), true_offset = %d, ctx->seek_ptr = %d\n", *ctx->fh, offset, true_offset, ctx->seek_ptr);
 	return ctx->seek_ptr;
 }
 
-static int csf_read_page(CSF_CTX *ctx, int pgno, void *data) {
-	int start_offset = HDR_SZ + (pgno * ctx->page_sz);
-	int cur_offset =  lseek(*ctx->fh, 0L, SEEK_CUR);
+static size_t csf_read_page(CSF_CTX *ctx, int pgno, void *data) {
+	off_t start_offset = HDR_SZ + (pgno * ctx->page_sz);
+	off_t cur_offset =  lseek(*ctx->fh, 0L, SEEK_CUR);
 	int to_read = ctx->page_sz;
-	int read_sz = 0;
-	int data_sz = 0;
+	size_t read_sz = 0;
+	size_t data_sz = 0;
 
 
 	if(cur_offset != start_offset) { /* if not in proper position for page, seek there */
@@ -132,7 +152,7 @@ static int csf_read_page(CSF_CTX *ctx, int pgno, void *data) {
 	
 	/* FIXME - error handling */
 	for(;read_sz < to_read;) {
-		int bytes_read = read(*ctx->fh, ctx->page_buffer + read_sz, to_read - read_sz);
+		size_t bytes_read = read(*ctx->fh, ctx->page_buffer + read_sz, to_read - read_sz);
 		read_sz += bytes_read;
 		if(bytes_read < 0) {
 			return 0;
@@ -152,11 +172,11 @@ static int csf_read_page(CSF_CTX *ctx, int pgno, void *data) {
 	return data_sz;
 }
 
-static int csf_write_page(CSF_CTX *ctx, int pgno, void *data, size_t data_sz) {
-	int start_offset = HDR_SZ + (pgno * ctx->page_sz);
-	int cur_offset =  lseek(*ctx->fh, 0L, SEEK_CUR);
+static size_t csf_write_page(CSF_CTX *ctx, int pgno, void *data, size_t data_sz) {
+	off_t start_offset = HDR_SZ + (pgno * ctx->page_sz);
+	off_t cur_offset =  lseek(*ctx->fh, 0L, SEEK_CUR);
 	int to_write = ctx->page_sz;
-	int write_sz = 0;
+	size_t write_sz = 0;
 
 	assert(data_sz <= ctx->page_sz);
 
@@ -170,7 +190,7 @@ static int csf_write_page(CSF_CTX *ctx, int pgno, void *data, size_t data_sz) {
 	memcpy(ctx->page_buffer + ctx->iv_sz + sizeof(int), data, data_sz);
 
 	for(;write_sz < to_write;) { /* FIXME - error handling */ 
-		int bytes_write = write(*ctx->fh, ctx->page_buffer + write_sz, to_write - write_sz);
+		size_t bytes_write = write(*ctx->fh, ctx->page_buffer + write_sz, to_write - write_sz);
 		write_sz += bytes_write;
 	}	
 	

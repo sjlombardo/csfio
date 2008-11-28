@@ -12,7 +12,7 @@
 
 int main(int argc, char **argv) {
 	int iter = 100;
-	int buffer_sz_max = 10*1024;
+	int buffer_sz_max = 100*1024;
 	int i,j,k;
 
 	printf("RAND_MAX = %u\n", RAND_MAX); 
@@ -61,7 +61,7 @@ int main(int argc, char **argv) {
 			
 			lseek(fd0, offset, SEEK_SET);
 			//lseek(fd1, offset, SEEK_SET);
-			csf_seek(csf_ctx, offset);
+			csf_seek(csf_ctx, offset, SEEK_SET);
 
 			tmp_sz0 = write(fd0, buffer0, len);
 			//tmp_sz1 = write(fd1, buffer1, len);
@@ -70,17 +70,17 @@ int main(int argc, char **argv) {
 			assert(tmp_sz0 == tmp_sz1);
 			assert(tmp_sz0 == len);
 
-			/* read current location, verify 
+			/* read current location, verify */
 			pos0 = lseek(fd0, 0, SEEK_CUR);
 			//pos1 = lseek(fd1, 0, SEEK_CUR);
 			pos1 = csf_seek(csf_ctx, 0, SEEK_CUR);
 
 			assert(pos0 == pos1);
-			*/
+
 			/* read back and verify write */
 			lseek(fd0, offset, SEEK_SET);
 			//lseek(fd1, offset, SEEK_SET);
-			csf_seek(csf_ctx, offset);
+			csf_seek(csf_ctx, offset, SEEK_SET);
 
 			tmp_sz0 = read(fd0, buffer0, len);
 			//tmp_sz1 = read(fd1, buffer1, len);
@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
 		/* read back the entire file and verify front to back */
 		lseek(fd0, 0, SEEK_SET);
 		//lseek(fd1, 0, SEEK_SET);
-		csf_seek(csf_ctx, 0);
+		csf_seek(csf_ctx, 0, SEEK_SET);
 
 		tmp_sz0 = read(fd0, buffer0, sz0);
 		//tmp_sz1 = read(fd1, buffer1, sz1);
@@ -108,14 +108,13 @@ int main(int argc, char **argv) {
 		assert(memcmp(buffer0, buffer1, sz0) == 0);
 
 	
-		/* read file size, verify 
+		/* read file size, verify */
 		pos0 = lseek(fd0, 0, SEEK_END);
 		//pos1 = lseek(fd1, 0, SEEK_END);
 		pos1 = csf_seek(csf_ctx, 0, SEEK_END);
 
 		assert(pos0 == pos1);
 		assert(pos0 == sz0);
-		*/
 	
 		printf("iteraton %d: wrote %d bytes, read %d bytes\n", i, sz0, sz0); 
 		
