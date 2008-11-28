@@ -25,7 +25,8 @@ typedef struct {
         int block_sz;
         int iv_sz;
         int page_sz;
-        unsigned char *keydata;
+        unsigned char *iv_data;
+        unsigned char *key_data;
         unsigned char *page_buffer;
         unsigned char *csf_buffer;
 } CSF_CTX;
