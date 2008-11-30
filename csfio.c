@@ -32,7 +32,7 @@ static void * csf_free(void * buf, int sz);
 static size_t csf_read_page(CSF_CTX *ctx, int pgno, void *data);
 static size_t csf_write_page(CSF_CTX *ctx, int pgno, void *data, size_t data_sz); 
 
-int csf_ctx_init(CSF_CTX **ctx_out, int *fh, unsigned char *key_data, int key_sz, int data_sz) {
+int csf_ctx_init(CSF_CTX **ctx_out, int *fh, unsigned char *key_data, int key_sz, int page_sz) {
   EVP_CIPHER_CTX ectx;
   CSF_CTX *ctx;
 
@@ -41,26 +41,31 @@ int csf_ctx_init(CSF_CTX **ctx_out, int *fh, unsigned char *key_data, int key_sz
   ctx->fh = fh;
 
   ctx->key_sz = key_sz;
-  ctx->data_sz = data_sz;
   ctx->key_data = csf_malloc(ctx->key_sz);
   memcpy(ctx->key_data, key_data, ctx->key_sz);
 
   EVP_EncryptInit(&ectx, CIPHER, ctx->key_data, NULL);
   ctx->block_sz = EVP_CIPHER_CTX_block_size(&ectx);
   ctx->iv_sz = EVP_CIPHER_CTX_iv_length(&ectx);
-  ctx->iv_data = csf_malloc(ctx->iv_sz);
-    
-  if(ctx->data_sz % ctx->block_sz != 0) {
-    printf("FATAL ERROR: Block Size error!\n");
-    return 1;
-  }
-    
+
   /* the combined page size includes the size of the initialization  
      vector, an integer for the count of bytes on page, and the data block */
-  ctx->page_sz = ctx->iv_sz + sizeof(int) + ctx->data_sz;
-  
+  ctx->page_sz = page_sz;
+
+  /* ensure the page header allocation ends on an even block alignment */
+  ctx->page_header_sz = (sizeof(CSF_PAGE_HEADER) % ctx->block_sz == 0) ? (sizeof(CSF_PAGE_HEADER) / ctx->block_sz) : (sizeof(CSF_PAGE_HEADER) / ctx->block_sz) + ctx->block_sz;
+
+  /* determine unused space avaliable for data */
+  ctx->data_sz = ctx->page_sz - ctx->iv_sz - ctx->page_header_sz;
+
+  assert(ctx->iv_sz %  ctx->block_sz == 0);
+  assert(ctx->page_header_sz %  ctx->block_sz == 0);
+  assert(ctx->data_sz %  ctx->block_sz == 0);
+  assert(ctx->page_sz %  ctx->block_sz == 0);
+
   ctx->page_buffer = csf_malloc(ctx->page_sz);
   ctx->csf_buffer = csf_malloc(ctx->page_sz);
+  ctx->scratch_buffer = csf_malloc(ctx->page_sz);
   
   EVP_CIPHER_CTX_cleanup(&ectx);
 
@@ -76,6 +81,7 @@ int csf_ctx_init(CSF_CTX **ctx_out, int *fh, unsigned char *key_data, int key_sz
 int csf_ctx_destroy(CSF_CTX *ctx) {
   csf_free(ctx->page_buffer, ctx->page_sz);
   csf_free(ctx->csf_buffer, ctx->page_sz);
+  csf_free(ctx->scratch_buffer, ctx->page_sz);
   csf_free(ctx->key_data, ctx->key_sz);
   csf_free(ctx, sizeof(CSF_CTX));  
 }
@@ -143,13 +149,12 @@ static size_t csf_read_page(CSF_CTX *ctx, int pgno, void *data) {
   off_t cur_offset =  lseek(*ctx->fh, 0L, SEEK_CUR);
   int to_read = ctx->page_sz;
   size_t read_sz = 0;
-  size_t data_sz = 0;
-
+  CSF_PAGE_HEADER header;
 
   if(cur_offset != start_offset) { /* if not in proper position for page, seek there */
     cur_offset = lseek(*ctx->fh, start_offset, SEEK_SET);
   }
-  
+ 
   /* FIXME - error handling */
   for(;read_sz < to_read;) {
     size_t bytes_read = read(*ctx->fh, ctx->page_buffer + read_sz, to_read - read_sz);
@@ -159,17 +164,30 @@ static size_t csf_read_page(CSF_CTX *ctx, int pgno, void *data) {
     }
   }  
 
+  if(ctx->encrypted) {
+    EVP_CIPHER_CTX ectx;
+    void *out_ptr =  ctx->scratch_buffer;
+    int out_sz, cipher_sz = 0;
 
-  memcpy(ctx->iv_data, ctx->page_buffer, ctx->iv_sz);
-  memcpy(&data_sz, ctx->page_buffer + ctx->iv_sz, sizeof(int));
+    EVP_CipherInit(&ectx, CIPHER, NULL, NULL, 0);
+    EVP_CIPHER_CTX_set_padding(&ectx, 0);
+    EVP_CipherInit(&ectx, NULL, ctx->key_data, ctx->page_buffer, 0);
+    EVP_CipherUpdate(&ectx, out_ptr + cipher_sz, &out_sz, ctx->page_buffer + ctx->iv_sz, ctx->page_header_sz + ctx->data_sz);
+    cipher_sz += out_sz;
+    EVP_CipherFinal(&ectx, out_ptr + cipher_sz, &out_sz);
+    cipher_sz += out_sz;
+    EVP_CIPHER_CTX_cleanup(&ectx);
+    assert(cipher_sz == (ctx->page_header_sz + ctx->data_sz));
+  } else {
+    memcpy(ctx->scratch_buffer, ctx->page_buffer + ctx->iv_sz, ctx->page_header_sz + ctx->data_sz);
+  }
 
-  /* normally this would encrypt here */
-  memcpy(data, ctx->page_buffer + ctx->iv_sz + sizeof(int), ctx->data_sz);
-  
+  memcpy(&header, ctx->scratch_buffer, sizeof(header));
+  memcpy(data, ctx->scratch_buffer + ctx->page_header_sz, header.data_sz);
 
   TRACE6("csf_read_page(%d,%d,x), cur_offset=%d, read_sz=%d, return=%d\n", *ctx->fh, pgno, cur_offset, read_sz, data_sz);
 
-  return data_sz;
+  return header.data_sz;
 }
 
 static size_t csf_write_page(CSF_CTX *ctx, int pgno, void *data, size_t data_sz) {
@@ -177,17 +195,39 @@ static size_t csf_write_page(CSF_CTX *ctx, int pgno, void *data, size_t data_sz)
   off_t cur_offset =  lseek(*ctx->fh, 0L, SEEK_CUR);
   int to_write = ctx->page_sz;
   size_t write_sz = 0;
+  CSF_PAGE_HEADER header;
 
-  assert(data_sz <= ctx->page_sz);
+  assert(data_sz <= ctx->data_sz);
+
+  header.data_sz = data_sz;
 
   if(cur_offset != start_offset) { /* if not in proper position for page, seek there */
     cur_offset = lseek(*ctx->fh, start_offset, SEEK_SET);
   }
   
   RAND_pseudo_bytes(ctx->page_buffer, ctx->iv_sz);
-  memcpy(ctx->page_buffer + ctx->iv_sz, &data_sz, sizeof(int));
+
+  memcpy(ctx->scratch_buffer, &header, sizeof(header));
+  memcpy(ctx->scratch_buffer + ctx->page_header_sz, data, data_sz);
+
   /* normally this would encrypt here */
-  memcpy(ctx->page_buffer + ctx->iv_sz + sizeof(int), data, data_sz);
+  if(ctx->encrypted) {
+    EVP_CIPHER_CTX ectx;
+    void *out_ptr =  ctx->page_buffer + ctx->iv_sz;
+    int out_sz, cipher_sz = 0;
+
+    EVP_CipherInit(&ectx, CIPHER, NULL, NULL, 1);
+    EVP_CIPHER_CTX_set_padding(&ectx, 0);
+    EVP_CipherInit(&ectx, NULL, ctx->key_data, ctx->page_buffer, 1);
+    EVP_CipherUpdate(&ectx, out_ptr + cipher_sz, &out_sz, ctx->scratch_buffer, ctx->page_header_sz + ctx->data_sz);
+    cipher_sz += out_sz;
+    EVP_CipherFinal(&ectx, out_ptr + cipher_sz, &out_sz);
+    cipher_sz += out_sz;
+    EVP_CIPHER_CTX_cleanup(&ectx);
+    assert(cipher_sz == (ctx->page_header_sz + ctx->data_sz));
+  } else {
+    memcpy(ctx->page_buffer + ctx->iv_sz, ctx->scratch_buffer, ctx->page_header_sz + ctx->data_sz);
+  }
 
   for(;write_sz < to_write;) { /* FIXME - error handling */ 
     size_t bytes_write = write(*ctx->fh, ctx->page_buffer + write_sz, to_write - write_sz);

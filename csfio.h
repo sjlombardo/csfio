@@ -15,6 +15,7 @@
 
 #define HDR_SZ sizeof(int)
 
+
 typedef struct {
   int *fh;
   off_t seek_ptr;
@@ -24,14 +25,19 @@ typedef struct {
   int data_sz;
   int block_sz;
   int iv_sz;
+  int page_header_sz;
   int page_sz;
-  unsigned char *iv_data;
   unsigned char *key_data;
   unsigned char *page_buffer;
+  unsigned char *scratch_buffer;
   unsigned char *csf_buffer;
 } CSF_CTX;
 
-int csf_ctx_init(CSF_CTX **ctx_out, int *fh, unsigned char *keydata, int key_sz, int data_sz);
+typedef struct {
+  size_t data_sz; /* index of last byte of data on page */
+} CSF_PAGE_HEADER;
+
+int csf_ctx_init(CSF_CTX **ctx_out, int *fh, unsigned char *keydata, int key_sz, int page_sz);
 int csf_truncate(CSF_CTX *ctx, int nByte);
 off_t csf_seek(CSF_CTX *ctx, off_t offset, int whence);
 int csf_read(CSF_CTX *ctx, void *buf, size_t nbyte);
