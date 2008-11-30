@@ -13,22 +13,22 @@
 #define MAJOR_VER 0
 #define MINOR_VER 0
 
-#define HDR_SZ          sizeof(int)
+#define HDR_SZ sizeof(int)
 
 typedef struct {
-	int *fh;
-        off_t seek_ptr;
-        off_t file_sz;
-        int encrypted;
-        int key_sz;
-        int data_sz;
-        int block_sz;
-        int iv_sz;
-        int page_sz;
-        unsigned char *iv_data;
-        unsigned char *key_data;
-        unsigned char *page_buffer;
-        unsigned char *csf_buffer;
+  int *fh;
+  off_t seek_ptr;
+  off_t file_sz;
+  int encrypted;
+  int key_sz;
+  int data_sz;
+  int block_sz;
+  int iv_sz;
+  int page_sz;
+  unsigned char *iv_data;
+  unsigned char *key_data;
+  unsigned char *page_buffer;
+  unsigned char *csf_buffer;
 } CSF_CTX;
 
 int csf_ctx_init(CSF_CTX **ctx_out, int *fh, unsigned char *keydata, int key_sz, int data_sz);
