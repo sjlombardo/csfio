@@ -239,7 +239,7 @@ static size_t csf_write_page(CSF_CTX *ctx, int pgno, void *data, size_t data_sz)
   return data_sz;
 }
 
-int csf_read(CSF_CTX *ctx, void *data, size_t nbyte) {
+size_t csf_read(CSF_CTX *ctx, void *data, size_t nbyte) {
   int start_page = csf_pageno_for_offset(ctx, ctx->seek_ptr);
   int start_offset = ctx->seek_ptr % ctx->data_sz;
   int to_read = nbyte + start_offset;
@@ -262,7 +262,7 @@ int csf_read(CSF_CTX *ctx, void *data, size_t nbyte) {
   return data_offset;
 }
 
-int csf_write(CSF_CTX *ctx, const void *data, size_t nbyte) {
+size_t csf_write(CSF_CTX *ctx, const void *data, size_t nbyte) {
   int start_page = csf_pageno_for_offset(ctx, ctx->seek_ptr);
   int start_offset = ctx->seek_ptr % ctx->data_sz;
   int to_write = nbyte + start_offset;
