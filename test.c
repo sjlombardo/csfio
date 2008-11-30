@@ -24,8 +24,8 @@ int main(int argc, char **argv) {
     int key_len;
     int fd0, fd1;
 
-    fd0 = open("./test0", O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
-    fd1 = open("./test1", O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    fd0 = open("./testfile.raw", O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
+    fd1 = open("./testfile.csf", O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR);
 
     key_len = 256;
     key = calloc(key_len, 1);
