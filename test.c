@@ -42,7 +42,7 @@ int main(int argc, char **argv) {
     sz0 = sz1 = rand() % buffer_sz_max;
   
     buffer0 = calloc(sz0, 1);
-    //RAND_pseudo_bytes(buffer0, sz0);
+    RAND_pseudo_bytes(buffer0, sz0);
     buffer1 = calloc(sz1, 1);
     memcpy(buffer1, buffer0, sz1);
 
@@ -55,8 +55,8 @@ int main(int argc, char **argv) {
     for(j = 0; j < iter; j++) {
       int offset = rand() % sz0;
       int len = rand() % (sz0 - offset);
-      //RAND_pseudo_bytes(buffer0, len);
-      memset(buffer0, 0, sz0);  
+      RAND_pseudo_bytes(buffer0, len);
+      //memset(buffer0, 0, sz0);  
       memcpy(buffer1, buffer0, len);
       
       lseek(fd0, offset, SEEK_SET);
