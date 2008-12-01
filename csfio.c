@@ -65,6 +65,8 @@ static size_t csf_read_page(CSF_CTX *ctx, int pgno, void *data);
 static size_t csf_write_page(CSF_CTX *ctx, int pgno, void *data, size_t data_sz); 
 static off_t csf_pageno_for_offset(CSF_CTX *ctx, int offset);
 static int csf_page_count_for_length(CSF_CTX *ctx, int length);
+static off_t csf_file_size(CSF_CTX *ctx);
+static int csf_page_count_for_file(CSF_CTX *ctx);
 
 int csf_ctx_init(CSF_CTX **ctx_out, int *fh, unsigned char *key_data, int key_sz, int page_sz) {
   EVP_CIPHER_CTX ectx;
@@ -121,6 +123,12 @@ int csf_ctx_destroy(CSF_CTX *ctx) {
   return 0;
 }
 
+static off_t csf_file_size(CSF_CTX *ctx) {
+  int page_count = csf_page_count_for_file(ctx);
+  int data_sz = csf_read_page(ctx, page_count-1, ctx->page_buffer);
+  return ((page_count - 1) * ctx->data_sz) + data_sz;
+}
+
 static int csf_page_count_for_file(CSF_CTX *ctx) {
   size_t cur_offset = lseek(*ctx->fh, 0, SEEK_CUR);
   size_t count = (lseek(*ctx->fh, 0, SEEK_END) - HDR_SZ) / ctx->page_sz;
@@ -152,7 +160,6 @@ off_t csf_seek(CSF_CTX *ctx, off_t offset, int whence) {
   off_t true_offset;
   off_t target_offset = 0;
   int page_count = csf_page_count_for_file(ctx);
-  int target_page = 0;
   size_t data_sz;
 
   switch(whence) {
@@ -163,44 +170,13 @@ off_t csf_seek(CSF_CTX *ctx, off_t offset, int whence) {
       target_offset = ctx->seek_ptr + offset;
       break;
     case SEEK_END:
-      /* FIXME optimize out second seek */
-      data_sz = csf_read_page(ctx, page_count-1, ctx->page_buffer);
-      target_offset = (((page_count - 1) * ctx->data_sz) + data_sz) + offset;
+      target_offset = csf_file_size(ctx) + offset;
       break;
   }  
   
-  target_page = csf_pageno_for_offset(ctx, target_offset);
-  true_offset = HDR_SZ + (target_page * ctx->page_sz);
-
-  if(target_page > page_count) {
-    /* this is a seek past end of file. we need to fill in the gaps. */
-    int i;
-
-    /* start by rewriting the current end page */
-    if(page_count > 0) {
-      size_t data_sz = csf_read_page(ctx, page_count-1, ctx->csf_buffer);
-      memset(ctx->csf_buffer + data_sz, 0, ctx->data_sz - data_sz); /* back fill an unused data on page with zeros */
-      data_sz = csf_write_page(ctx, page_count-1, ctx->csf_buffer, ctx->data_sz);
-      assert(data_sz == ctx->data_sz);
-    }
-
-    /* loop through the next page on through the n-1 page, fill up with zero data */
-    memset(ctx->csf_buffer, 0, ctx->page_sz); // zero out the data!
-    for(i = page_count; i < target_page - 1; i++) {
-      csf_write_page(ctx, i, ctx->csf_buffer, ctx->data_sz); 
-    }
-
-    /* take the last page, and write out the proper number of bytes to reach the target offset */
-    csf_write_page(ctx, target_page-1, ctx->csf_buffer, target_offset % ctx->data_sz); 
-    
-  } else {
-      csf_seek = lseek(*ctx->fh, true_offset, SEEK_SET);
-      assert(csf_seek == true_offset);
-  }
-
   ctx->seek_ptr = target_offset;
 
-  TRACE5("csf_seek(%d,%d), true_offset = %d, ctx->seek_ptr = %d\n", *ctx->fh, offset, true_offset, ctx->seek_ptr);
+  TRACE5("csf_seek(%d,%d,%d), ctx->seek_ptr = %d\n", *ctx->fh, offset, whence, ctx->seek_ptr);
   return ctx->seek_ptr;
 }
 
@@ -330,6 +306,28 @@ size_t csf_write(CSF_CTX *ctx, const void *data, size_t nbyte) {
   int pages_to_write = csf_page_count_for_length(ctx, to_write);
   int i, data_offset = 0;
   int page_count = csf_page_count_for_file(ctx);
+
+  if(start_page > page_count) {
+    /* this is a seek past end of file. we need to fill in the gap. sorry no sparse files */
+    int i;
+
+    /* start by rewriting the current end page */
+    if(page_count > 0) {
+      size_t data_sz = csf_read_page(ctx, page_count-1, ctx->csf_buffer);
+      memset(ctx->csf_buffer + data_sz, 0, ctx->data_sz - data_sz); /* back fill an unused data on page with zeros */
+      data_sz = csf_write_page(ctx, page_count-1, ctx->csf_buffer, ctx->data_sz);
+      assert(data_sz == ctx->data_sz);
+    }
+
+    /* loop through the next page on through the n-1 page, fill up with zero data */
+    memset(ctx->csf_buffer, 0, ctx->page_sz); // zero out the data!
+    for(i = page_count; i < start_page - 1; i++) {
+      csf_write_page(ctx, i, ctx->csf_buffer, ctx->data_sz); 
+    }
+
+    /* take the last page, and write out the proper number of bytes to reach the target offset */
+    csf_write_page(ctx, start_page-1, ctx->csf_buffer, ctx->seek_ptr % ctx->data_sz); 
+  }
 
   for(i = 0; i < pages_to_write; i++) {
     int data_sz = (to_write < ctx->data_sz ? to_write : ctx->data_sz);
